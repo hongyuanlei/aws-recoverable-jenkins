@@ -1,0 +1,7 @@
+application: jenkins
+version: 1
+ami: ami-c63d6aa5
+instance_type: t2.micro
+as_max: 1
+as_min: 1
+resource_bucket_name: hongsuanni-jenkins
