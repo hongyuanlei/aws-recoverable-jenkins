@@ -84,36 +84,38 @@ Resources:
              - "lambda:*"
              - "events:*"
             Resource: '*'
-  InstanceProfile:
-    Type: AWS::IAM::InstanceProfile
+  JenkinsRecordSet:
+    Type: AWS::Route53::RecordSet
     Properties:
-      Path: /
-      Roles:
-      - !Ref 'Role'
-  JenkinsSSHSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
+      HostedZoneName: !Sub "${HostedZoneName}."
+      Name: !Sub "${RecordName}-${Version}.${HostedZoneName}."
+      Type: CNAME
+      TTL: 60
+      ResourceRecords:
+      - !GetAtt [JenkinsELB, DNSName]
+  JenkinsELB:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
     Properties:
-      GroupDescription: Allowing incoming on ssh port
-      SecurityGroupIngress:
-      - CidrIp: 0.0.0.0/0
-        IpProtocol: '-1'
-        FromPort: '0'
-        ToPort: '0'
-      - CidrIp: 0.0.0.0/0
-        IpProtocol: tcp
-        FromPort: '22'
-        ToPort: '22'
-      VpcId: !Ref 'VpcID'
-  JenkinsConnectionSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Allowing Jenkins client connection
-      SecurityGroupIngress:
-      - CidrIp: 0.0.0.0/0
-        IpProtocol: tcp
-        FromPort: '8080'
-        ToPort: '8080'
-      VpcId: !Ref 'VpcID'
+      Subnets: !Ref PublicSubnets
+      CrossZone: true
+      SecurityGroups:
+      - !Ref JenkinsELBConnectionSecurityGroup
+      Listeners:
+      - LoadBalancerPort: 80
+        InstancePort: 8080
+        Protocol: HTTP
+        InstanceProtocol: HTTP
+      - LoadBalancerPort: 443
+        InstancePort: 8080
+        Protocol: HTTPS
+        InstanceProtocol: HTTP
+        SSLCertificateId: !Ref SSLCertArn
+      HealthCheck:
+        HealthyThreshold: 2
+        Interval: 60
+        Timeout: 8
+        Target: HTTP:8080/login
+        UnhealthyThreshold: 2
   JenkinsELBConnectionSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -121,44 +123,32 @@ Resources:
       SecurityGroupIngress:
       - CidrIp: 0.0.0.0/0
         IpProtocol: tcp
-        FromPort: '80'
-        ToPort: '80'
+        FromPort: 80
+        ToPort: 80
       - CidrIp: 0.0.0.0/0
         IpProtocol: tcp
-        FromPort: '443'
-        ToPort: '443'
-      VpcId: !Ref 'VpcID'
-
-  JenkinsELB:
-    Type: AWS::ElasticLoadBalancing::LoadBalancer
+        FromPort: 443
+        ToPort: 443
+      VpcId: !Ref VpcID
+  JenkinsASGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
-      Subnets: !Ref 'PublicSubnets'
-      CrossZone: true
-      SecurityGroups:
-      - !Ref 'JenkinsELBConnectionSecurityGroup'
-      Listeners:
-      - LoadBalancerPort: '80'
-        InstancePort: '8080'
-        Protocol: HTTP
-        InstanceProtocol: TCP
-      - LoadBalancerPort: '443'
-        InstancePort: '8080'
-        Protocol: HTTPS
-        InstanceProtocol: SSL
-        SSLCertificateId: !Ref 'SSLCertArn'
-      HealthCheck:
-        HealthyThreshold: '2'
-        Interval: '60'
-        Timeout: '8'
-        Target: HTTP:8080/login
-        UnhealthyThreshold: '2'
+      AvailabilityZones: !Ref AvailabilityZones
+      VPCZoneIdentifier: !Ref PrivateSubnets
+      HealthCheckGracePeriod: 1000
+      HealthCheckType: ELB
+      LaunchConfigurationName: !Ref JenkinsASLaunchConf
+      MinSize: !Ref ASGMinSize
+      MaxSize: !Ref ASGMaxSize
+      LoadBalancerNames:
+      - !Ref JenkinsELB
   JenkinsASLaunchConf:
     Type: AWS::AutoScaling::LaunchConfiguration
     Metadata:
       AWS::CloudFormation::Init:
         configSets:
-          InstallAndRun: [Configure]
-        Configure:
+          InstallAndRun: [Install]
+        Install:
           files:
             /usr/local/bin/jenkins-restore:
               content: !Sub |
@@ -230,18 +220,18 @@ Resources:
                 PATH=/bin:/usr/bin:/usr/local/bin
                 59 0 * * * root jenkins-backup /var/lib/jenkins s3://{{s3_bucket}}/jenkins-`date +\%Y\%m\%d\%H\%M.tar.gz` >> /var/log/jenkins-backup.log 2>&1
               context:
-                s3_bucket: !Ref 'ResourceBucketName'
+                s3_bucket: !Ref ResourceBucketName
               mode: '000644'
               owner: root
               group: root
     Properties:
-      InstanceType: !Ref 'InstanceType'
-      ImageId: !Ref 'AMI'
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref AMI
       SecurityGroups:
-      - !Ref 'JenkinsSSHSecurityGroup'
-      - !Ref 'JenkinsConnectionSecurityGroup'
-      KeyName: !Ref 'KeyName'
-      IamInstanceProfile: !Ref 'InstanceProfile'
+      - !Ref JenkinsSSHSecurityGroup
+      - !Ref JenkinsConnectionSecurityGroup
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref InstanceProfile
       UserData:
         "Fn::Base64": !Sub |
           #!/bin/bash -ex
@@ -252,9 +242,6 @@ Resources:
           }
 
           yum update -y
-          yum install -y python-pip python-devel git
-          pip install --upgrade pip
-          pip install awscli ansible boto3 botocore
 
           /opt/aws/bin/cfn-init -s ${AWS::StackName} -r JenkinsASLaunchConf  --region ${AWS::Region} --configsets InstallAndRun --role ${Role}|| error_exit 'Failed to run cfn-init'
 
@@ -270,31 +257,40 @@ Resources:
           service jenkins start
 
           /opt/aws/bin/cfn-signal -e 0 -r "Jenkins instance Stack Complete." '${WaitHandle}'
-  JenkinsASGroup:
-    Type: AWS::AutoScaling::AutoScalingGroup
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
     Properties:
-      AvailabilityZones: !Ref 'AvailabilityZones'
-      VPCZoneIdentifier: !Ref 'PrivateSubnets'
-      HealthCheckGracePeriod: 1000
-      HealthCheckType: ELB
-      LaunchConfigurationName: !Ref 'JenkinsASLaunchConf'
-      MinSize: !Ref 'ASGMinSize'
-      MaxSize: !Ref 'ASGMaxSize'
-      LoadBalancerNames:
-      - !Ref 'JenkinsELB'
-  JenkinsRecordSet:
-    Type: AWS::Route53::RecordSet
+      Path: /
+      Roles:
+      - !Ref Role
+  JenkinsSSHSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
     Properties:
-      HostedZoneName: !Join ['', [!Ref 'HostedZoneName', '.']]
-      Name: !Join ['', [!Ref 'RecordName', '-' , !Ref 'Version', '.', !Ref 'HostedZoneName', '.']]
-      Type: CNAME
-      TTL: 60
-      ResourceRecords:
-      - !GetAtt [JenkinsELB, DNSName]
+      GroupDescription: Allowing incoming on ssh port
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: '-1'
+        FromPort: 0
+        ToPort: 0
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+      VpcId: !Ref VpcID
+  JenkinsConnectionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allowing Jenkins client connection
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: tcp
+        FromPort: 8080
+        ToPort: 8080
+      VpcId: !Ref VpcID
   WaitHandle:
     Type: AWS::CloudFormation::WaitConditionHandle
   WaitCondition:
     Type: AWS::CloudFormation::WaitCondition
     Properties:
-      Handle: !Ref 'WaitHandle'
-      Timeout: '1500'
+      Handle: !Ref WaitHandle
+      Timeout: 1500
