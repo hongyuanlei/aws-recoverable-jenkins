@@ -140,9 +140,11 @@ Resources:
       - LoadBalancerPort: '80'
         InstancePort: '8080'
         Protocol: HTTP
+        InstanceProtocol: TCP
       - LoadBalancerPort: '443'
         InstancePort: '8080'
         Protocol: HTTPS
+        InstanceProtocol: SSL
         SSLCertificateId: !Ref 'SSLCertArn'
       HealthCheck:
         HealthyThreshold: '2'
