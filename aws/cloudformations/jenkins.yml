@@ -7,9 +7,6 @@ Parameters:
   PublicSubnets:
     Description: The public subnets in the VPC
     Type: CommaDelimitedList
-  PrivateSubnets:
-    Description: The private subnets in the VPC
-    Type: CommaDelimitedList
   KeyName:
     Description: Name of an existing EC2 KeyPair to enable SSH access
     Type: String
@@ -92,31 +89,16 @@ Resources:
       Type: CNAME
       TTL: 60
       ResourceRecords:
-      - !GetAtt [JenkinsELB, DNSName]
-  JenkinsELB:
-    Type: AWS::ElasticLoadBalancing::LoadBalancer
+      - !GetAtt [LoadBalancer, DNSName]
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
-      Subnets: !Ref PublicSubnets
-      CrossZone: true
+      Scheme: internet-facing
+      Subnets:
+        Ref: PublicSubnets
       SecurityGroups:
-      - !Ref JenkinsELBConnectionSecurityGroup
-      Listeners:
-      - LoadBalancerPort: 80
-        InstancePort: 8080
-        Protocol: HTTP
-        InstanceProtocol: HTTP
-      - LoadBalancerPort: 443
-        InstancePort: 8080
-        Protocol: HTTPS
-        InstanceProtocol: HTTP
-        SSLCertificateId: !Ref SSLCertArn
-      HealthCheck:
-        HealthyThreshold: 2
-        Interval: 60
-        Timeout: 8
-        Target: HTTP:8080/login
-        UnhealthyThreshold: 2
-  JenkinsELBConnectionSecurityGroup:
+        - Ref: ALBConnectionSecurityGroup
+  ALBConnectionSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Allowing Jenkins client connection
@@ -129,19 +111,63 @@ Resources:
         IpProtocol: tcp
         FromPort: 443
         ToPort: 443
-      VpcId: !Ref VpcID
+      VpcId:
+        Ref: VpcID
+  ALBHTPPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn:
+            Ref: ALBTargetGroup
+      LoadBalancerArn:
+        Ref: LoadBalancer
+      Port: 80
+      Protocol: HTTP
+  ALBHTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Certificates:
+        - CertificateArn: !Ref SSLCertArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn:
+            Ref: ALBTargetGroup
+      LoadBalancerArn:
+        Ref: LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 5
+      Matcher:
+        HttpCode: 200
+      Name: 'jenkins-target-group'
+      Protocol: HTTP
+      Port: 8080
+      HealthCheckPath: '/login'
+      UnhealthyThresholdCount: 3
+      VpcId:
+        Ref: VpcID
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 120
   JenkinsASGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
       AvailabilityZones: !Ref AvailabilityZones
-      VPCZoneIdentifier: !Ref PrivateSubnets
+      VPCZoneIdentifier: !Ref PublicSubnets
       HealthCheckGracePeriod: 1000
       HealthCheckType: ELB
       LaunchConfigurationName: !Ref JenkinsASLaunchConf
       MinSize: !Ref ASGMinSize
       MaxSize: !Ref ASGMaxSize
-      LoadBalancerNames:
-      - !Ref JenkinsELB
+      TargetGroupARNs:
+      - !Ref ALBTargetGroup
   JenkinsASLaunchConf:
     Type: AWS::AutoScaling::LaunchConfiguration
     Metadata:

@@ -17,7 +17,6 @@
         Version: "{{version}}"
         AvailabilityZones: "{{zones}}"
         PublicSubnets: "{{public_subnets}}"
-        PrivateSubnets: "{{private_subnets}}"
         ASGMaxSize: "{{as_max}}"
         ASGMinSize: "{{as_min}}"
         ResourceBucketName: "{{resource_bucket_name}}"
